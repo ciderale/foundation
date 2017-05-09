@@ -110,7 +110,7 @@ showHex :: Word16 -> [Char]
 showHex = Base.printf "%04x"
 
 fromLString :: [Char] -> IPv6
-fromLString = parseOnly ipv6Parser
+fromLString = either (error . show) id . parseOnly ipv6Parser
 
 
 -- | create an IPv6 from the given tuple

@@ -18,6 +18,7 @@
 
 {-# LANGUAGE Rank2Types #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module Foundation.Parser
     ( Parser(..)
@@ -67,7 +68,6 @@ data ParserError input
     | MonadFail String
         -- ^ only use in the event of Monad.fail function
   deriving (Show, Eq, Ord, Typeable)
-instance (Show input, Typeable input) => Exception (ParserError input)
 
 -- | Simple parsing result, that represent respectively:
 --
@@ -79,7 +79,7 @@ instance (Show input, Typeable input) => Exception (ParserError input)
 --
 data Result input a =
       ParseFail (ParserError input)
-    | ParseMore (Maybe input -> Result input a)
+    | ParseMore (input -> Result input a)
     | ParseOK   input a
 
 instance (Show ba, Show a) => Show (Result ba a) where
@@ -101,22 +101,31 @@ newtype Parser input a = Parser
                            -> Result input r }
 
 instance Functor (Parser input) where
-    fmap f p = Parser $ \buf err ok ->
-       runParser p buf err (\b a -> ok b (f a))
-instance Applicative (Parser input) where
-    pure      = return
-    (<*>) d e = d >>= \b -> e >>= \a -> return (b a)
-instance Monad (Parser input) where
-    fail errorMsg = Parser $ \buf err _ -> err buf (MonadFail $ fromList errorMsg)
-    return v      = Parser $ \buf _ ok -> ok buf v
+  fmap f fa = Parser $ \inp err ok -> runParser fa inp err (\inp' a -> ok inp' (f a))
+
+instance Sequential input => Applicative (Parser input) where
+    pure a     = Parser $ \buf _ ok -> ok buf a
+    fab <*> fa = Parser $ \buf err ok ->
+        runParser fab buf  err $ \buf1 ab ->
+          if null buf1
+             then getMore   fa      err $ \buf2 a -> ok buf2 (ab a)
+             else runParser fa buf1 err $ \buf2 a -> ok buf2 (ab a)
+
+instance Sequential input => Monad (Parser input) where
+    return        = pure
     m >>= k       = Parser $ \buf err ok ->
-        runParser m buf err (\buf' a -> runParser (k a) buf' err ok)
-instance MonadPlus (Parser input) where
+        let onOk buf' a
+              | null buf' = ParseMore (\buf'' -> runParser (k a) buf'' err ok)
+              | otherwise = runParser (k a) buf' err ok
+         in runParser m buf err onOk
+
+instance Sequential input => MonadPlus (Parser input) where
     mzero = fail "MonadPlus.mzero"
     mplus f g = Parser $ \buf err ok ->
         -- rewrite the err callback of @f to call @g
         runParser f buf (\_ _ -> runParser g buf err ok) ok
-instance Alternative (Parser input) where
+
+instance Sequential input => Alternative (Parser input) where
     empty = fail "Alternative.empty"
     (<|>) = mplus
 
@@ -125,7 +134,7 @@ instance Alternative (Parser input) where
 -- If the Parser need more data than available, the @feeder function
 -- is automatically called and fed to the More continuation.
 parseFeed :: (Sequential input, Monad m)
-          => m (Maybe input)
+          => m input
           -> Parser input a
           -> input
           -> m (Result input a)
@@ -146,28 +155,16 @@ parse p s = runParser p s (\_ msg -> ParseFail msg) ParseOK
 parseOnly :: (Typeable input, Show input, Sequential input, Element input ~ Char)
           => Parser input a
           -> input
-          -> a
-parseOnly p i = continuously maximumIterations (parse p i)
-  where
-    maximumIterations :: Int
-    maximumIterations = 256
-    continuously _ (ParseOK _ a) = a
-    continuously _ (ParseFail err) = throw err
-    continuously n (ParseMore f)
-        | n == 0 = error "Foundation.Parser.parseOnly: not enough (please report error)"
-        | otherwise = continuously (n - 1) (f Nothing)
+          -> Either (ParserError input) a
+parseOnly p i =  case maybe (error "impossible") id $ parseFeed (Just mempty) p i of
+    ParseOK   _ a -> Right a
+    ParseFail err -> Left err
+    ParseMore f   -> error "impossible happened..."
 
--- When needing more data, getMore append the next data
--- to the current buffer. if no further data, then
--- the err callback is called.
-getMore :: Sequential input => Parser input ()
-getMore = Parser $ \buf err ok -> ParseMore $ \nextChunk ->
-    case nextChunk of
-        Nothing -> err buf NotEnough
-        Just nc
-            | null nc   -> runParser getMore buf err ok
-            | otherwise -> ok (mappend buf nc) ()
-
+-- When needing more data
+getMore :: Parser input a -> Failure input b -> Success input a b -> Result input b
+getMore parser err ok =
+    ParseMore (\buf -> runParser parser buf err ok)
 --
 -- Only used by takeAll, which accumulate all the remaining data
 -- until ParseMore is fed a Nothing value.
@@ -175,35 +172,29 @@ getMore = Parser $ \buf err ok -> ParseMore $ \nextChunk ->
 -- getAll cannot fail.
 getAll :: Sequential input => Parser input ()
 getAll = Parser $ \buf err ok -> ParseMore $ \nextChunk ->
-    case nextChunk of
-        Nothing -> ok buf ()
-        Just nc -> runParser getAll (mappend buf nc) err ok
+    if null nextChunk
+        then ok buf ()
+        else runParser getAll (mappend buf nextChunk) err ok
 
 -- Only used by skipAll, which flush all the remaining data
 -- until ParseMore is fed a Nothing value.
 --
 -- flushAll cannot fail.
 flushAll :: Sequential input => Parser input ()
-flushAll = Parser $ \buf err ok -> ParseMore $ \nextChunk ->
-    case nextChunk of
-        Nothing -> ok buf ()
-        Just _  -> runParser flushAll mempty err ok
+flushAll = Parser $ \_ err ok -> ParseMore $ \nextChunk ->
+    if null nextChunk
+       then ok nextChunk ()
+       else runParser flushAll nextChunk err ok
 
 hasMore :: Sequential input => Parser input Bool
-hasMore = Parser $ \buf err ok ->
-    if null buf
-        then ParseMore $ \nextChunk ->
-            case nextChunk of
-                Nothing -> ok buf False
-                Just nc -> runParser hasMore nc err ok
-        else ok buf True
+hasMore = Parser $ \buf _ ok -> ok buf (not $ null buf)
 
 -- | Get the next `Element input` from the parser
 anyElement :: Sequential input => Parser input (Element input)
 anyElement = Parser $ \buf err ok ->
     case uncons buf of
-        Nothing      -> runParser (getMore >> anyElement) buf err ok
         Just (c1,b2) -> ok b2 c1
+        Nothing      -> err buf NotEnough
 
 -- | Parse a specific `Element input` at current position
 --
@@ -213,7 +204,7 @@ element :: (Sequential input, Eq (Element input))
         => Element input -> Parser input ()
 element w = Parser $ \buf err ok ->
     case uncons buf of
-        Nothing      -> runParser (getMore >> element w) buf err ok
+        Nothing      -> err buf NotEnough
         Just (c1,b2) | c1 == w   -> ok b2 ()
                      | otherwise -> err buf (Expected (singleton w) (singleton c1))
 
@@ -227,17 +218,20 @@ elements = consumeEq
     -- partially consume as much as possible or raise an error.
     consumeEq expected = Parser $ \actual err ok ->
         let eLen = length expected in
-         if length actual >= eLen
-             then    -- enough data for doing a full match
-                let (aMatch,aRem) = splitAt eLen actual
-                 in if aMatch == expected
-                     then ok aRem ()
-                     else err actual (Expected expected aMatch)
-             else    -- not enough data, match as much as we have, and then recurse.
-                let (eMatch, eRem) = splitAt (length actual) expected
-                 in if actual == eMatch
-                     then runParser (getMore >> consumeEq eRem) mempty err ok
-                     else err actual (Expected expected eMatch)
+        if null actual && eLen > 0
+            then err actual NotEnough
+            else
+                  if length actual >= eLen
+                    then    -- enough data for doing a full match
+                        let (aMatch,aRem) = splitAt eLen actual
+                         in if aMatch == expected
+                              then ok aRem ()
+                              else err actual (Expected expected aMatch)
+                    else    -- not enough data, match as much as we have, and then recurse.
+                      let (eMatch, eRem) = splitAt (length actual) expected
+                       in if actual == eMatch
+                          then getMore (consumeEq eRem) err ok
+                          else err actual (Expected expected eMatch)
 
 string :: String -> Parser String ()
 string !expected = Parser $ \actual err ok ->
@@ -245,30 +239,35 @@ string !expected = Parser $ \actual err ok ->
         !expLen   = length expBytes
         !actBytes = toBytes UTF8 actual
         !actLen   = length actBytes
-     in if expLen <= actLen
-          then
-              let (!aMatch, !aRem) = splitAt expLen actBytes
-               in if aMatch == expBytes
-                   then ok (fromBytesUnsafe aRem) ()
-                   else err actual (Expected expected (fromBytesUnsafe aMatch))
-          else
-              let (!eMatch, !eRem) = splitAt actLen expBytes
-               in if actBytes == eMatch
-                   then runParser (getMore >> string (fromBytesUnsafe eRem)) mempty err ok
-                   else err actual (Expected expected (fromBytesUnsafe eMatch))
+     in if null actual && expLen > 0
+          then err actual NotEnough
+          else if expLen <= actLen
+                  then
+                    let (!aMatch, !aRem) = splitAt expLen actBytes
+                     in if aMatch == expBytes
+                          then ok (fromBytesUnsafe aRem) ()
+                          else err actual (Expected expected (fromBytesUnsafe aMatch))
+                  else
+                    let (!eMatch, !eRem) = splitAt actLen expBytes
+                    in if actBytes == eMatch
+                          then getMore (string (fromBytesUnsafe eRem)) err ok
+                          else err actual (Expected expected (fromBytesUnsafe eMatch))
 
 -- | Take @n elements from the current position in the stream
 take :: Sequential input => Int -> Parser input input
 take n = Parser $ \buf err ok ->
-    if length buf >= n
-        then let (b1,b2) = splitAt n buf in ok b2 b1
-        else runParser (getMore >> take n) buf err ok
+    if null buf && n > 0
+       then err buf NotEnough
+       else if n <= length buf
+                then let (t, r) = splitAt n buf in ok r t
+                else getMore (take (n - length buf)) err
+                           $ \buf' tA -> ok buf' (buf <> tA)
 
 -- | take one element if satisfy the given predicate
 satisfy :: Sequential input => (Element input -> Bool) -> Parser input (Element input)
 satisfy predicate = Parser $ \buf err ok ->
     case uncons buf of
-        Nothing      -> runParser (getMore >> satisfy predicate) buf err ok
+        Nothing      -> err buf NotEnough
         Just (c1,b2) | predicate c1 -> ok b2 c1
                      | otherwise -> err buf DoesNotSatify
 
@@ -276,33 +275,39 @@ satisfy predicate = Parser $ \buf err ok ->
 -- stream
 takeWhile :: Sequential input => (Element input -> Bool) -> Parser input input
 takeWhile predicate = Parser $ \buf err ok ->
-    let (b1, b2) = span predicate buf
-     in if null b2
-            then runParser (getMore >> takeWhile predicate) buf err ok
-            else ok b2 b1
+    if null buf
+      then ok buf mempty
+      else let (b1, b2) = span predicate buf
+            in if null b2
+                  then getMore (takeWhile predicate) err
+                          $ \buf' b1T -> ok buf' (b1 <> b1T)
+                  else ok b2 b1
 
 -- | Take the remaining elements from the current position in the stream
 takeAll :: Sequential input => Parser input input
-takeAll = Parser $ \buf err ok ->
-    runParser (getAll >> returnBuffer) buf err ok
+takeAll = getAll >> returnBuffer
   where
     returnBuffer = Parser $ \buf _ ok -> ok mempty buf
 
 -- | Skip @n elements from the current position in the stream
 skip :: Sequential input => Int -> Parser input ()
 skip n = Parser $ \buf err ok ->
-    if length buf >= n
-        then ok (drop n buf) ()
-        else runParser (getMore >> skip (n - length buf)) mempty err ok
+    if null buf && n > 0
+       then err buf NotEnough
+       else if n <= length buf
+                then ok (drop n buf) ()
+                else getMore (skip (n - length buf)) err ok
 
 -- | Skip `Element input` while the @predicate hold from the current position
 -- in the stream
 skipWhile :: Sequential input => (Element input -> Bool) -> Parser input ()
 skipWhile p = Parser $ \buf err ok ->
-    let (_, b2) = span p buf
-     in if null b2
-            then runParser (getMore >> skipWhile p) mempty err ok
-            else ok b2 ()
+    if null buf
+        then ok buf mempty
+        else let (_, b2) = span p buf
+              in if null b2
+                    then getMore (skipWhile p) err ok
+                    else ok b2 ()
 
 -- | Skip all the remaining `Element input` from the current position in the
 -- stream

@@ -58,7 +58,7 @@ toString :: IPv4 -> String
 toString = fromList . toLString
 
 fromLString :: [Char] -> IPv4
-fromLString = parseOnly ipv4Parser
+fromLString = either (error . show) id . parseOnly ipv4Parser
 
 toLString :: IPv4 -> [Char]
 toLString ipv4 =

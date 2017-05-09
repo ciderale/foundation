@@ -14,7 +14,7 @@ import Test.Tasty.HUnit
 
 data TestCaseRes a
     = TestCaseOk String a
-    | TestCaseMore (Maybe String) (TestCaseRes a)
+    | TestCaseMore String (TestCaseRes a)
     | TestCaseFail
   deriving (Show)
 
@@ -42,51 +42,51 @@ parseTestCases = testGroup "units"
     [ testGroup "element"
         [ testCase "Ok" $ parseTestCase "a" (element 'a') (TestCaseOk "" ())
         , testCase "Fail" $ parseTestCase "b" (element 'a') TestCaseFail
-        , testCase "MoreOk" $ parseTestCase "" (element 'a') (TestCaseMore (Just "a") (TestCaseOk "" ()))
-        , testCase "MoreFail" $ parseTestCase "" (element 'a') (TestCaseMore Nothing TestCaseFail)
+        , testCase "MoreOk" $ parseTestCase "a" (element 'a' >> element 'a') (TestCaseMore "a" (TestCaseOk "" ()))
+        , testCase "MoreFail" $ parseTestCase "" (element 'a') TestCaseFail
         ]
     , testGroup "elements"
         [ testCase "Ok" $ parseTestCase "abc" (elements "ab") (TestCaseOk "c" ())
         , testCase "Fail" $ parseTestCase "ac" (elements "ab") TestCaseFail
-        , testCase "MoreOk" $ parseTestCase "a" (elements "abc") (TestCaseMore (Just "bc") (TestCaseOk "" ()))
-        , testCase "MoreMoreOk" $ parseTestCase "a" (elements "abc") (TestCaseMore (Just "b") $ TestCaseMore (Just "c") (TestCaseOk "" ()))
-        , testCase "MoreMoreFail" $ parseTestCase "a" (elements "abc") (TestCaseMore (Just "b") $ TestCaseMore Nothing TestCaseFail)
+        , testCase "MoreOk" $ parseTestCase "a" (elements "abc") (TestCaseMore "bc" (TestCaseOk "" ()))
+        , testCase "MoreMoreOk" $ parseTestCase "a" (elements "abc") (TestCaseMore "b" $ TestCaseMore "c" (TestCaseOk "" ()))
+        , testCase "MoreMoreFail" $ parseTestCase "a" (elements "abc") (TestCaseMore "b" $ TestCaseMore mempty TestCaseFail)
         ]
     , testGroup "anyElement"
         [ testCase "OK" $ parseTestCase "a"   anyElement (TestCaseOk "" 'a')
         , testCase "OkRemains" $ parseTestCase "abc" anyElement (TestCaseOk "bc" 'a')
-        , testCase "MoreOk" $ parseTestCase ""    anyElement $ TestCaseMore (Just "abc")(TestCaseOk "bc" 'a')
-        , testCase "MoreFail" $ parseTestCase ""    anyElement $ TestCaseMore Nothing TestCaseFail
+        , testCase "MoreOk" $ parseTestCase "a"    (anyElement *> anyElement) $ TestCaseMore "bc" (TestCaseOk "c" 'b')
+        , testCase "MoreFail" $ parseTestCase "a"  (anyElement *> anyElement) $ TestCaseMore mempty TestCaseFail
         ]
     , testGroup "take"
         [ testCase "OK" $ parseTestCase "a" (P.take 1) (TestCaseOk "" "a")
         , testCase "OkRemains" $ parseTestCase "abc" (P.take 2) (TestCaseOk "c" "ab")
-        , testCase "MoreOk" $ parseTestCase "" (P.take 2) $ TestCaseMore (Just "abc")(TestCaseOk "c" "ab")
-        , testCase "MoreFail" $ parseTestCase "a" (P.take 2) $ TestCaseMore Nothing TestCaseFail
+        , testCase "MoreOk" $ parseTestCase "a" (P.take 2) $ TestCaseMore "bc" (TestCaseOk "c" "ab")
+        , testCase "MoreFail" $ parseTestCase "a" (P.take 2) $ TestCaseMore mempty TestCaseFail
         ]
     , testGroup "takeWhile"
         [ testCase "OK" $ parseTestCase "a " (takeWhile (' ' /=)) (TestCaseOk " " "a")
         , testCase "OkRemains" $ parseTestCase "ab bc" (takeWhile (' ' /=)) (TestCaseOk " bc" "ab")
-        , testCase "MoreOk" $ parseTestCase "ab" (takeWhile (' ' /=)) $ TestCaseMore (Just "cd ")(TestCaseOk " " "abcd")
-        , testCase "MoreFail" $ parseTestCase "aa" (takeWhile (' ' /=)) $ TestCaseMore Nothing TestCaseFail
+        , testCase "MoreOk" $ parseTestCase "ab" (takeWhile (' ' /=)) $ TestCaseMore "cd " (TestCaseOk " " "abcd")
+        , testCase "MoreFail" $ parseTestCase "aa" (takeWhile (' ' /=)) $ TestCaseMore mempty (TestCaseOk "" "aa")
         ]
     , testGroup "takeAll"
-        [ testCase "OK" $ parseTestCase "abc" takeAll (TestCaseMore Nothing $ TestCaseOk "" "abc")
+        [ testCase "OK" $ parseTestCase "abc" takeAll (TestCaseMore mempty $ TestCaseOk "" "abc")
         ]
     , testGroup "skip"
         [ testCase "OK" $ parseTestCase "a" (skip 1) (TestCaseOk "" ())
         , testCase "OkRemains" $ parseTestCase "abc" (skip 2) (TestCaseOk "c" ())
-        , testCase "MoreOk" $ parseTestCase "" (skip 2) $ TestCaseMore (Just "abc")(TestCaseOk "c" ())
-        , testCase "MoreFail" $ parseTestCase "a" (skip 2) $ TestCaseMore Nothing TestCaseFail
+        , testCase "MoreOk" $ parseTestCase "a" (skip 2) $ TestCaseMore "bc" (TestCaseOk "c" ())
+        , testCase "MoreFail" $ parseTestCase "a" (skip 2) $ TestCaseMore mempty TestCaseFail
         ]
     , testGroup "skipWhile"
         [ testCase "OK" $ parseTestCase "a " (skipWhile (' ' /=)) (TestCaseOk " " ())
         , testCase "OkRemains" $ parseTestCase "ab bc" (skipWhile (' ' /=)) (TestCaseOk " bc" ())
-        , testCase "MoreOk" $ parseTestCase "ab" (skipWhile (' ' /=)) $ TestCaseMore (Just "cd ")(TestCaseOk " " ())
-        , testCase "MoreFail" $ parseTestCase "aa" (skipWhile (' ' /=)) $ TestCaseMore Nothing TestCaseFail
+        , testCase "MoreOk" $ parseTestCase "ab" (skipWhile (' ' /=)) $ TestCaseMore "cd " (TestCaseOk " " ())
+        , testCase "MoreFail" $ parseTestCase "aa" (skipWhile (' ' /=)) $ TestCaseMore mempty (TestCaseOk "" ())
         ]
     , testGroup "skipAll"
-        [ testCase "OK" $ parseTestCase "abc" skipAll (TestCaseMore Nothing $ TestCaseOk "abc" ())
+        [ testCase "OK" $ parseTestCase "abc" skipAll (TestCaseMore mempty $ TestCaseOk "" ())
         ]
     , testGroup "optional"
         [ testCase "Nothing" $ parseTestCase "aaa" (optional $ elements "bbb") (TestCaseOk "aaa" Nothing)
