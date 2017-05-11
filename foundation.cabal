@@ -162,6 +162,8 @@ library
                      Foundation.Internal.Natural
                      Foundation.Internal.NumLiteral
                      Foundation.Internal.Typeable
+                     Foundation.JSON.Parse.Internal
+                     Foundation.JSON.Parse.Types
                      Foundation.Numerical.Primitives
                      Foundation.Numerical.Number
                      Foundation.Numerical.Additive
